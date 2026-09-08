@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+/*
+ * Clipur Media Command — white & blue light theme.
+ * Single source of truth for palette tokens; Tailwind v4 generates
+ * utilities from these (bg-surface, text-mute, border-line, ...).
+ */
+@theme {
+  --color-accent: #29b6f6;
+  --color-accent-deep: #1565c0;
+  --color-accent-soft: #e3f2fd;
+
+  --color-bg: #ffffff;
+  --color-surface: #f5f9ff;
+  --color-panel: #ffffff;
+
+  --color-line: #dce6f2;
+  --color-text: #0b1b2b;
+  --color-mute: #5b7189;
+
+  --shadow-card: 0 1px 2px rgba(11, 27, 43, 0.04), 0 6px 20px rgba(21, 101, 192, 0.06);
+  --shadow-pop: 0 10px 40px rgba(11, 27, 43, 0.16);
+}
+
+html,
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Progress track fill: accent-deep -> accent, left to right. */
+.progress-fill {
+  background-image: linear-gradient(90deg, var(--color-accent-deep), var(--color-accent));
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.animate-toast-in {
+  animation: toast-in 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-toast-in {
+    animation: none;
+  }
+}
