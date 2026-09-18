@@ -1,0 +1,9 @@
+# Normalise line endings so Windows, macOS and Linux checkouts agree.
+* text=auto eol=lf
+
+# Binary / generated
+*.png binary
+*.jpg binary
+*.ico binary
+*.db binary
+package-lock.json -diff

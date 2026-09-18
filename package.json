@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "seed": "node scripts/seed.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "next": "^15.5.0",
@@ -19,5 +21,9 @@
     "@types/react-dom": "^19.1.0",
     "tailwindcss": "^4.1.0",
     "typescript": "^5.9.0"
+  },
+  "description": "Internal output-tracking dashboard for the Clipur media team.",
+  "engines": {
+    "node": ">=24.0.0"
   }
 }

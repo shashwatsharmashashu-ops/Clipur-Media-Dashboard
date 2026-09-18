@@ -1,160 +1,212 @@
 "use client";
 
 import { useState } from "react";
-import type { Clip } from "@/lib/types";
+import type { Clip, ClipOwnerType } from "@/lib/types";
 import { formatViews, prettyUrl } from "@/lib/format";
+import { todayIso } from "@/lib/date";
 import { useShowViews } from "@/components/providers/ViewsProvider";
+import { useData } from "@/components/providers/DataProvider";
+import { useToast } from "@/components/providers/ToastProvider";
+import DeleteButton from "./DeleteButton";
+import ClipDate from "./ClipDate";
+import BulkClipForm from "./BulkClipForm";
 
 /**
- * The clip log for a tracked item. Paste a url (+ optional label) to append.
+ * The clip log. Logging a clip is one action: paste the link.
  *
- * Clips with no views are entirely normal and render identically to clips
- * with views when the global Show-views toggle is off. View counts are muted
- * reference text — never a score, never a ranking here.
+ * The server appends it, adds exactly one to the owner's posted count, and
+ * stamps it with a date (today by default) so it counts toward that day's
+ * progress. A link that normalizes to one already logged here is refused, so
+ * the same post can never be counted twice. Any admin can add or remove clips
+ * and change a clip's date to backfill an earlier day.
+ *
+ * View counts are muted reference text and appear only when the global
+ * Show-views toggle is on.
  */
 export default function ClipList({
   clips,
-  onAddClip,
+  ownerType,
+  ownerId,
+  ownerLabel,
 }: {
   clips: Clip[];
-  onAddClip: (input: { url: string; label?: string; views?: number | null }) => void;
+  ownerType: ClipOwnerType;
+  ownerId: string;
+  ownerLabel: string;
 }) {
   const showViews = useShowViews();
-  const [url, setUrl] = useState("");
-  const [label, setLabel] = useState("");
-  const [views, setViews] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  const { addClip, removeClip, updateClip } = useData();
+  const { showToast } = useToast();
 
-  function submit() {
+  const [url, setUrl] = useState("");
+  const [date, setDate] = useState(todayIso);
+  const [pending, setPending] = useState(false);
+  const [notice, setNotice] = useState<{ kind: "error" | "duplicate"; text: string } | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [bulk, setBulk] = useState(false);
+
+  const VISIBLE = 5;
+  const ordered = [...clips].reverse(); // newest first
+  const shown = expanded ? ordered : ordered.slice(0, VISIBLE);
+
+  async function submit() {
     const trimmed = url.trim();
     if (!trimmed) {
-      setError("Paste a clip url first.");
+      setNotice({ kind: "error", text: "Paste a clip link first." });
       return;
     }
 
-    const parsedViews = views.trim() === "" ? null : Number(views.replace(/[,\s]/g, ""));
-    if (parsedViews !== null && !Number.isFinite(parsedViews)) {
-      setError("Views must be a number, or left blank.");
+    setPending(true);
+    const result = await addClip(ownerType, ownerId, { url: trimmed, clipDate: date });
+    setPending(false);
+
+    if (result.ok) {
+      setUrl("");
+      setNotice(null);
+      showToast(
+        date === todayIso()
+          ? `Clip logged · +1 post for ${ownerLabel}`
+          : `Clip logged on ${date} · +1 post for ${ownerLabel}`,
+      );
       return;
     }
 
-    onAddClip({
-      url: trimmed,
-      label: label.trim() || undefined,
-      views: parsedViews,
-    });
-
-    setUrl("");
-    setLabel("");
-    setViews("");
-    setError(null);
-  }
-
-  function handleSubmit(event: React.FormEvent) {
-    event.preventDefault();
-    submit();
-  }
-
-  /** Enter submits from any field. preventDefault first, so the native
-      implicit submission cannot fire a second time. */
-  function handleKeyDown(event: React.KeyboardEvent) {
-    if (event.key !== "Enter") return;
-    event.preventDefault();
-    submit();
+    if (result.duplicate) {
+      setNotice({ kind: "duplicate", text: "Already logged — not counted again." });
+      return;
+    }
+    setNotice({ kind: "error", text: result.error ?? "Could not log that clip." });
   }
 
   return (
     <div>
       <div className="mb-2 flex items-center justify-between">
-        <h4 className="text-xs font-semibold uppercase tracking-wide text-mute">
-          Clips
-        </h4>
-        <span className="text-xs tabular-nums text-mute">
-          {clips.length} logged
-        </span>
+        <h4 className="text-xs font-semibold uppercase tracking-wide text-mute">Clips</h4>
+        <span className="text-xs tabular-nums text-mute">{clips.length} logged</span>
       </div>
 
       {clips.length > 0 ? (
-        <ul className="mb-3 divide-y divide-line overflow-hidden rounded-xl border border-line">
-          {clips.map((clip) => (
-            <li
-              key={clip.id}
-              className="flex items-center justify-between gap-3 bg-panel px-3 py-2.5 transition-colors hover:bg-surface"
-            >
-              <a
-                href={clip.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="min-w-0 flex-1 truncate text-sm text-text hover:text-accent-deep hover:underline"
-                title={clip.url}
+        <>
+          <ul className="mb-2 divide-y divide-line overflow-hidden rounded-xl border border-line">
+            {shown.map((clip) => (
+              <li
+                key={clip.id}
+                className="group flex items-center justify-between gap-2 bg-panel px-3 py-2 transition-colors hover:bg-surface"
               >
-                {clip.label || prettyUrl(clip.url)}
-              </a>
+                <a
+                  href={clip.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="min-w-0 flex-1 truncate text-sm text-text hover:text-accent-deep hover:underline"
+                  title={clip.url}
+                >
+                  {clip.label || prettyUrl(clip.url)}
+                </a>
 
-              {showViews && typeof clip.views === "number" && (
-                <span className="shrink-0 text-xs tabular-nums text-mute">
-                  {formatViews(clip.views)} views
-                  {clip.viewsSource === "api" && (
-                    <span className="ml-1 opacity-60">· auto</span>
-                  )}
-                </span>
-              )}
-            </li>
-          ))}
-        </ul>
+                <ClipDate
+                  value={clip.clipDate}
+                  label={clip.label || clip.url}
+                  onCommit={(clipDate) => void updateClip(clip.id, { clipDate })}
+                />
+
+                {showViews && typeof clip.views === "number" && (
+                  <span className="shrink-0 text-xs tabular-nums text-mute">
+                    {formatViews(clip.views)} views
+                    {clip.viewsSource === "api" && <span className="ml-1 opacity-60">· auto</span>}
+                  </span>
+                )}
+
+                <DeleteButton
+                  size="sm"
+                  label="clip"
+                  className="opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
+                  onConfirm={() => void removeClip(clip.id)}
+                />
+              </li>
+            ))}
+          </ul>
+
+          {ordered.length > VISIBLE && (
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              className="mb-3 text-xs font-medium text-mute hover:text-accent-deep"
+            >
+              {expanded ? "Show fewer" : `Show all ${ordered.length}`}
+            </button>
+          )}
+        </>
       ) : (
-        <p className="mb-3 rounded-xl border border-dashed border-line bg-surface px-3 py-4 text-sm text-mute">
+        <p className="mb-3 rounded-xl border border-dashed border-line bg-surface px-3 py-3 text-sm text-mute">
           No clips logged yet.
         </p>
       )}
 
-      <form onSubmit={handleSubmit} className="flex flex-wrap items-start gap-2">
+      {bulk ? (
+        <BulkClipForm
+          ownerType={ownerType}
+          ownerId={ownerId}
+          ownerLabel={ownerLabel}
+          onDone={() => setBulk(false)}
+        />
+      ) : (
+      <div className="flex flex-wrap items-center gap-2">
         <input
           type="url"
           value={url}
+          disabled={pending}
           onChange={(e) => {
             setUrl(e.target.value);
-            setError(null);
+            setNotice(null);
           }}
-          onKeyDown={handleKeyDown}
-          placeholder="Paste clip url"
-          aria-label="Clip url"
-          className="min-w-[12rem] flex-[2] rounded-lg border border-line bg-panel px-3 py-2 text-sm text-text placeholder:text-mute/70 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
+          onKeyDown={(e) => {
+            if (e.key !== "Enter") return;
+            e.preventDefault();
+            void submit();
+          }}
+          placeholder="Paste clip link"
+          aria-label={`Paste a clip link for ${ownerLabel}`}
+          className="min-w-[11rem] flex-1 rounded-lg border border-line bg-panel px-3 py-2 text-sm text-text placeholder:text-mute/70 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25 disabled:opacity-60"
         />
+        {/* Defaults to today; change it to log against an earlier day. */}
         <input
-          type="text"
-          value={label}
-          onChange={(e) => setLabel(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Label (optional)"
-          aria-label="Clip label, optional"
-          className="min-w-[9rem] flex-1 rounded-lg border border-line bg-panel px-3 py-2 text-sm text-text placeholder:text-mute/70 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
+          type="date"
+          value={date}
+          disabled={pending}
+          onChange={(e) => setDate(e.target.value || todayIso())}
+          aria-label="Day this clip counts toward"
+          title="Day this clip counts toward"
+          className="w-[9rem] rounded-lg border border-line bg-panel px-2 py-2 text-sm text-mute focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25 disabled:opacity-60"
         />
-        {/* Manual views entry only surfaces when views are being shown at all.
-            A future API provider fills this field instead. */}
-        {showViews && (
-          <input
-            type="text"
-            inputMode="numeric"
-            value={views}
-            onChange={(e) => setViews(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Views (optional)"
-            aria-label="Views, optional reference"
-            className="w-32 rounded-lg border border-line bg-panel px-3 py-2 text-sm text-text placeholder:text-mute/70 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/25"
-          />
-        )}
         <button
-          type="submit"
-          className="rounded-lg bg-accent-deep px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-accent focus:outline-none focus:ring-2 focus:ring-accent/40"
+          type="button"
+          disabled={pending}
+          onClick={() => void submit()}
+          className="rounded-lg bg-accent-deep px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-accent focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-60"
         >
-          Add clip
+          {pending ? "Adding…" : "Log clip"}
         </button>
-      </form>
+        <button
+          type="button"
+          onClick={() => {
+            setBulk(true);
+            setNotice(null);
+          }}
+          className="text-xs font-medium text-mute underline-offset-2 hover:text-accent-deep hover:underline"
+        >
+          Paste multiple
+        </button>
+      </div>
+      )}
 
-      {error && (
-        <p role="alert" className="mt-2 text-xs text-accent-deep">
-          {error}
+      {notice && (
+        <p
+          role="status"
+          className={`mt-2 text-xs ${
+            notice.kind === "duplicate" ? "text-mute" : "text-rose-600"
+          }`}
+        >
+          {notice.text}
         </p>
       )}
     </div>

@@ -1,10 +1,11 @@
 "use client";
 
-export type TabKey = "viral" | "campaign" | "strategy" | "reports";
+export type TabKey = "viral" | "campaign" | "calendar" | "strategy" | "reports";
 
 const TABS: { key: TabKey; label: string }[] = [
   { key: "viral", label: "Viral" },
   { key: "campaign", label: "Campaign" },
+  { key: "calendar", label: "Calendar" },
   { key: "strategy", label: "Strategy" },
   { key: "reports", label: "Reports" },
 ];

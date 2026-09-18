@@ -1,6 +1,43 @@
-node_modules
-.next
-out
-.env*.local
-next-env.d.ts
+# dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# next.js build artifacts
+.next/
+out/
+build/
+dist/
 *.tsbuildinfo
+next-env.d.ts
+
+# environment — never commit real values, only .env.example
+.env
+.env.local
+.env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# local database: password hashes and live team data, machine-local by design
+data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# logs and debug output
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# vercel
+.vercel

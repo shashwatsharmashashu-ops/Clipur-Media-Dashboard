@@ -1,5 +1,9 @@
+"use client";
+
 import { APP_NAME, CONTENT_FOLDER_URL } from "@/lib/config";
+import type { AdminUser } from "@/lib/types";
 import ViewsToggle from "./ViewsToggle";
+import AccountMenu from "./auth/AccountMenu";
 
 /** Placeholder mark — swap for the real Clipur logo asset. */
 function LogoPlaceholder() {
@@ -13,7 +17,7 @@ function LogoPlaceholder() {
   );
 }
 
-export default function Header() {
+export default function Header({ user }: { user: AdminUser }) {
   const folderConfigured = CONTENT_FOLDER_URL !== "REPLACE_WITH_DRIVE_URL";
 
   return (
@@ -23,12 +27,8 @@ export default function Header() {
           <div className="flex items-center gap-3">
             <LogoPlaceholder />
             <div>
-              <p className="text-base font-semibold leading-tight text-text">
-                {APP_NAME}
-              </p>
-              <p className="text-xs text-mute">
-                Output tracker · posts made against target
-              </p>
+              <p className="text-base font-semibold leading-tight text-text">{APP_NAME}</p>
+              <p className="text-xs text-mute">Output tracker · posts made against target</p>
             </div>
           </div>
 
@@ -61,12 +61,11 @@ export default function Header() {
                 <path d="M2.5 5.5A1.5 1.5 0 0 1 4 4h3.4l1.6 2H16a1.5 1.5 0 0 1 1.5 1.5v7A1.5 1.5 0 0 1 16 16H4a1.5 1.5 0 0 1-1.5-1.5v-9Z" />
               </svg>
               Content Folder
-              {!folderConfigured && (
-                <span className="text-[11px] opacity-70">· not set</span>
-              )}
+              {!folderConfigured && <span className="text-[11px] opacity-70">· not set</span>}
             </a>
 
             <ViewsToggle />
+            <AccountMenu user={user} />
           </div>
         </div>
       </div>
