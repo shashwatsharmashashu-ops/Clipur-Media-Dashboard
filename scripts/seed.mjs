@@ -12,7 +12,7 @@
  * counts toward, and each of those days gets its own frozen target, so the
  * calendar has something meaningful to show from the first render.
  */
-import { DatabaseSync } from "node:sqlite";
+import { createClient } from "@libsql/client";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -27,23 +27,39 @@ const args = new Set(process.argv.slice(2));
 const RESET_CONTENT = args.has("--reset");
 const RESET_PASSWORDS = args.has("--reset-passwords");
 
-fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-const db = new DatabaseSync(dbPath);
-db.exec("PRAGMA journal_mode = WAL");
-db.exec("PRAGMA foreign_keys = ON");
-applySchema(db);
+// Local file by default; a Turso URL when one is configured, which is how
+// the same script seeds a hosted deployment.
+const url = process.env.TURSO_DATABASE_URL?.trim() || `file:${dbPath}`;
+if (url.startsWith("file:")) fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
-/** Commit on success, roll back on throw. node:sqlite has no helper of its own. */
-function tx(fn) {
-  db.exec("BEGIN");
-  try {
-    const result = fn();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    db.exec("ROLLBACK");
-    throw error;
+const db = createClient({ url, authToken: process.env.TURSO_AUTH_TOKEN?.trim() || undefined });
+await applySchema(db);
+
+/**
+ * Writes are queued rather than executed one at a time: against a remote
+ * database, 1500 individual round trips would take minutes. The queue is
+ * flushed in batches, each batch a single transaction.
+ */
+const queue = [];
+
+/** Mimics a prepared statement, but appends to the queue instead of running. */
+function stmt(sql) {
+  return { run: (...args) => queue.push({ sql, args }) };
+}
+
+const BATCH_SIZE = 500;
+
+async function flush() {
+  while (queue.length > 0) {
+    const chunk = queue.splice(0, BATCH_SIZE);
+    await db.batch(chunk, "write");
   }
+}
+
+/** Reads a single COUNT(*)-style value. */
+async function count(sql) {
+  const result = await db.execute(sql);
+  return Number(result.rows[0]?.n ?? 0);
 }
 
 const uid = (p) => `${p}_${crypto.randomBytes(8).toString("hex")}`;
@@ -53,16 +69,15 @@ const nowIso = () => new Date().toISOString();
 
 const ADMINS = ["simon", "preston", "alec", "shashwat", "max", "himansh", "meet"];
 
-function seedAdmins() {
-  const existing = new Set(
-    db.prepare("SELECT username FROM users").all().map((r) => r.username),
-  );
+async function seedAdmins() {
+  const result = await db.execute("SELECT username FROM users");
+  const existing = new Set(result.rows.map((row) => row.username));
   const issued = [];
 
-  const insert = db.prepare(
+  const insert = stmt(
     "INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)",
   );
-  const updatePw = db.prepare("UPDATE users SET password_hash = ? WHERE username = ?");
+  const updatePw = stmt("UPDATE users SET password_hash = ? WHERE username = ?");
 
   for (const username of ADMINS) {
     if (!existing.has(username)) {
@@ -73,7 +88,7 @@ function seedAdmins() {
       const password = generatePassword();
       updatePw.run(hashPassword(password), username);
       // Existing sessions must not survive a credential change.
-      db.prepare(
+      stmt(
         "DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = ?)",
       ).run(username);
       issued.push({ username, password });
@@ -238,7 +253,7 @@ let urlCounter = 1_800_000_000;
 const nextUrlId = () => String(++urlCounter);
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "");
 
-const insertClip = db.prepare(
+const insertClip = stmt(
   `INSERT INTO clips (id, owner_type, owner_id, url, normalized_url, label, views, views_source, clip_date, created_at)
    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 );
@@ -297,34 +312,36 @@ function splitAcross(count, owners, dayIndex) {
 /* ------------------------------------------------------------------- seed */
 
 function clearContent() {
-  db.exec(`
-    DELETE FROM clips;
-    DELETE FROM accounts;
-    DELETE FROM niches;
-    DELETE FROM items;
-    DELETE FROM strategies;
-    DELETE FROM reports;
-    DELETE FROM daily_targets;
-    DELETE FROM day_targets;
-  `);
+  for (const table of [
+    "clips",
+    "accounts",
+    "niches",
+    "items",
+    "strategies",
+    "reports",
+    "daily_targets",
+    "day_targets",
+  ]) {
+    stmt(`DELETE FROM ${table}`).run();
+  }
 }
 
 function seedContent() {
-  const nicheInsert = db.prepare(
+  const nicheInsert = stmt(
     "INSERT INTO niches (id, platform, key, name, sort) VALUES (?, ?, ?, ?, ?)",
   );
-  const accountInsert = db.prepare(
+  const accountInsert = stmt(
     `INSERT INTO accounts (id, niche_id, handle, status, posts_target, posts_made, sort)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
-  const itemInsert = db.prepare(
+  const itemInsert = stmt(
     `INSERT INTO items (id, kind, platform, group_name, name, status, posts_target, posts_made, sort)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
-  const dailyTargetInsert = db.prepare(
+  const dailyTargetInsert = stmt(
     "INSERT INTO daily_targets (scope_type, scope_id, target) VALUES (?, ?, ?)",
   );
-  const dayTargetInsert = db.prepare(
+  const dayTargetInsert = stmt(
     "INSERT INTO day_targets (scope_type, scope_id, date, target) VALUES (?, ?, ?, ?)",
   );
 
@@ -447,7 +464,7 @@ function seedContent() {
 
   /* --- Strategies and reports ------------------------------------------- */
 
-  const strategyInsert = db.prepare(
+  const strategyInsert = stmt(
     `INSERT INTO strategies (id, title, description, status, platform, selected,
        report_reach, report_top_clip, report_verdict, sort)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -467,7 +484,7 @@ function seedContent() {
     );
   });
 
-  const reportInsert = db.prepare(
+  const reportInsert = stmt(
     "INSERT INTO reports (id, week, summary, posted_date) VALUES (?, ?, ?, ?)",
   );
   REPORTS.forEach((r) => reportInsert.run(uid("rep"), r.week, r.summary, r.postedDate));
@@ -476,28 +493,28 @@ function seedContent() {
 /* -------------------------------------------------------------------- run */
 
 const hasContent =
-  (db.prepare("SELECT COUNT(*) AS n FROM niches").get().n ?? 0) > 0 ||
-  (db.prepare("SELECT COUNT(*) AS n FROM items").get().n ?? 0) > 0;
+  (await count("SELECT COUNT(*) AS n FROM niches")) > 0 ||
+  (await count("SELECT COUNT(*) AS n FROM items")) > 0;
 
-tx(() => {
-  if (RESET_CONTENT) clearContent();
-  if (RESET_CONTENT || !hasContent) seedContent();
-});
+if (RESET_CONTENT) clearContent();
+if (RESET_CONTENT || !hasContent) seedContent();
+await flush();
 
-const issued = tx(seedAdmins);
+const issued = await seedAdmins();
+await flush();
 
 const counts = {
-  niches: db.prepare("SELECT COUNT(*) AS n FROM niches").get().n,
-  accounts: db.prepare("SELECT COUNT(*) AS n FROM accounts").get().n,
-  items: db.prepare("SELECT COUNT(*) AS n FROM items").get().n,
-  clips: db.prepare("SELECT COUNT(*) AS n FROM clips").get().n,
-  days: db.prepare("SELECT COUNT(DISTINCT clip_date) AS n FROM clips").get().n,
-  strategies: db.prepare("SELECT COUNT(*) AS n FROM strategies").get().n,
-  reports: db.prepare("SELECT COUNT(*) AS n FROM reports").get().n,
-  users: db.prepare("SELECT COUNT(*) AS n FROM users").get().n,
+  niches: await count("SELECT COUNT(*) AS n FROM niches"),
+  accounts: await count("SELECT COUNT(*) AS n FROM accounts"),
+  items: await count("SELECT COUNT(*) AS n FROM items"),
+  clips: await count("SELECT COUNT(*) AS n FROM clips"),
+  days: await count("SELECT COUNT(DISTINCT clip_date) AS n FROM clips"),
+  strategies: await count("SELECT COUNT(*) AS n FROM strategies"),
+  reports: await count("SELECT COUNT(*) AS n FROM reports"),
+  users: await count("SELECT COUNT(*) AS n FROM users"),
 };
 
-console.log(`\nDatabase: ${dbPath}`);
+console.log(`\nDatabase: ${url}`);
 console.log(
   `Seeded: ${counts.niches} niches, ${counts.accounts} X accounts, ${counts.items} items, ` +
     `${counts.clips} clips across ${counts.days} days, ${counts.strategies} strategies, ` +

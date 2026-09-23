@@ -5,7 +5,7 @@ import type { DailyScopeType } from "@/lib/types";
 
 /** The standing daily target for every scope. */
 export async function GET() {
-  return withAdmin(() => json({ scopes: listDailyScopes() }));
+  return withAdmin(async () => json({ scopes: await listDailyScopes() }));
 }
 
 /**
@@ -34,11 +34,17 @@ export async function PATCH(request: Request) {
 
     if (body.date !== undefined) {
       if (!isIsoDate(body.date)) return badRequest("Date must be YYYY-MM-DD.");
-      setDayTarget(scopeType as DailyScopeType, scopeId, body.date, target);
-      return json({ scopes: listDailyScopes(), calendar: getMonthCalendar(monthOf(body.date)) });
+      await setDayTarget(scopeType as DailyScopeType, scopeId, body.date, target);
+      return json({
+        scopes: await listDailyScopes(),
+        calendar: await getMonthCalendar(monthOf(body.date)),
+      });
     }
 
-    setStandingTarget(scopeType as DailyScopeType, scopeId, target);
-    return json({ scopes: listDailyScopes(), calendar: getMonthCalendar(monthOf(todayIso())) });
+    await setStandingTarget(scopeType as DailyScopeType, scopeId, target);
+    return json({
+      scopes: await listDailyScopes(),
+      calendar: await getMonthCalendar(monthOf(todayIso())),
+    });
   });
 }

@@ -176,42 +176,52 @@ items, campaigns, strategies and reports are all editable in the app.
 
 ## Storage
 
-SQLite on disk via `node:sqlite` — a real server-side store, shared by everyone
-using that server, surviving restarts. No localStorage, nothing in memory.
+libSQL (SQLite) via `@libsql/client`. One driver covers both ways of running
+the app, chosen by environment variable:
 
-- Database file: `data/clipur.db` (gitignored — it holds password hashes and
-  live team data). Override with `CLIPUR_DB_PATH`.
-- Schema lives in `lib/schema.mjs`, imported by both the app and the seed script
-  so the two cannot drift. It is created and migrated on boot.
+| Where | Configuration | Store |
+| --- | --- | --- |
+| Local development | nothing set | `./data/clipur.db` on disk |
+| Hosted (Vercel, etc.) | `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` | Turso database |
+
+A serverless host has no writable, persistent filesystem, so the local-file
+fallback cannot be used there — that is the whole reason for the Turso path.
+
+- The database file is gitignored; it holds password hashes and live data.
+- Schema lives in `lib/schema.mjs`, imported by both the app and the seed
+  script so the two cannot drift. It is created on boot if absent.
 - `lib/daily.ts` owns daily targets and calendar queries; `lib/repo.ts` owns
-  everything else. Clip counting and de-duplication are enforced there and by a
+  everything else and is the only module that writes clips. Clip counting and
+  de-duplication are enforced there and by a
   `UNIQUE(owner_type, owner_id, normalized_url)` index, so the invariant holds
   even against a direct write.
+- Every database call is async, because the store may be remote. Rows are
+  rebuilt as plain objects before leaving the repository layer, which is what
+  lets a React Server Component pass them to a Client Component.
 
-### Moving to another machine or a server
+## Deploying to Vercel
 
-The code is portable; **the data is not copied by git**. A fresh clone starts
-with an empty database.
+1. **Create the database.** With the [Turso CLI](https://docs.turso.tech):
+   ```bash
+   turso db create clipur
+   turso db show clipur --url      # -> TURSO_DATABASE_URL
+   turso db tokens create clipur   # -> TURSO_AUTH_TOKEN
+   ```
+2. **Seed it once**, from your machine, pointed at the hosted database:
+   ```bash
+   TURSO_DATABASE_URL=libsql://… TURSO_AUTH_TOKEN=… npm run seed
+   ```
+   This prints the seven admin passwords once. Save them then.
+3. **Import the repo** at vercel.com/new. Framework preset: Next.js. No build
+   setting changes are needed.
+4. **Add environment variables** in the Vercel project (Settings →
+   Environment Variables), for Production and Preview:
+   `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and optionally
+   `NEXT_PUBLIC_CONTENT_FOLDER_URL`.
+5. **Deploy**, then open the URL and sign in.
 
-- To start clean: `npm run seed`.
-- To carry the real data across: copy `data/clipur.db` (plus any `-wal` and
-  `-shm` files) to the same path on the target machine. Do not email it — it
-  contains password hashes and all team data.
-- Each machine running its own copy has its own separate data. For the team to
-  share one dataset, deploy once and have everyone use that URL.
-
-### Deployment notes
-
-- The app needs a **persistent writable disk** for the SQLite file. A VPS, or
-  Fly.io / Railway / Render with a mounted volume, works. Vercel's serverless
-  filesystem does **not** — that would mean swapping SQLite for Postgres, which
-  is contained to `lib/repo.ts` and `lib/daily.ts`.
-- Session cookies are marked `Secure` when `NODE_ENV=production`, so production
-  must be served over **HTTPS** or nobody can stay signed in.
-- Set `CLIPUR_DB_PATH` to the mounted volume, then run `npm run seed` once on
-  the server.
-
----
+Redeploy after changing an environment variable — Vercel does not apply them
+to an existing deployment.
 
 ## Layout
 

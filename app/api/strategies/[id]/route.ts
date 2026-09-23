@@ -21,7 +21,7 @@ export async function PATCH(request: Request, { params }: Params) {
       report?: { reach?: string; topClip?: string; verdict?: string } | null;
     }>(request);
 
-    updateStrategy(id, {
+    await updateStrategy(id, {
       title: body.title,
       description: body.description,
       status: validStrategyStatus(body.status),
@@ -36,7 +36,7 @@ export async function PATCH(request: Request, { params }: Params) {
 export async function DELETE(_request: Request, { params }: Params) {
   return withAdmin(async () => {
     const { id } = await params;
-    deleteStrategy(id);
+    await deleteStrategy(id);
     return stateResponse();
   });
 }

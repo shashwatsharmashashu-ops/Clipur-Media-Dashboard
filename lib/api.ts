@@ -47,8 +47,8 @@ export async function withAdmin(
 }
 
 /** Standard success payload for a mutation: the whole fresh state. */
-export function stateResponse(extra: Record<string, unknown> = {}) {
-  return json({ ...extra, state: getDashboardState() });
+export async function stateResponse(extra: Record<string, unknown> = {}) {
+  return json({ ...extra, state: await getDashboardState() });
 }
 
 /** Reads and parses a JSON body, tolerating an empty one. */

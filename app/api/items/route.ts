@@ -29,7 +29,7 @@ export async function POST(request: Request) {
       return badRequest("A valid platform is required.");
     }
 
-    createItem({
+    await createItem({
       kind,
       platform: kind === "platform" ? validPlatform(body.platform) : null,
       groupName: kind === "platform" ? (body.groupName ?? "").trim() || null : null,

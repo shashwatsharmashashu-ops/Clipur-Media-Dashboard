@@ -20,7 +20,7 @@ export async function POST(request: Request) {
     const title = (body.title ?? "").trim();
     if (!title) return badRequest("A title is required.");
 
-    createStrategy({
+    await createStrategy({
       title,
       description: body.description,
       status: validStrategyStatus(body.status),

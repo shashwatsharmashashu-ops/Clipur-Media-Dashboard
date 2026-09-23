@@ -11,7 +11,7 @@ const MONTH_RE = /^\d{4}-\d{2}$/;
  * `?accountsFor=YYYY-MM-DD` adds the per-account X breakdown for that date.
  */
 export async function GET(request: Request) {
-  return withAdmin(() => {
+  return withAdmin(async () => {
     const url = new URL(request.url);
     const month = url.searchParams.get("month") ?? currentMonth();
     if (!MONTH_RE.test(month)) return badRequest("Month must be YYYY-MM.");
@@ -22,9 +22,9 @@ export async function GET(request: Request) {
     }
 
     return json({
-      calendar: getMonthCalendar(month),
-      scopes: listDailyScopes(),
-      accounts: accountsFor ? getDayAccounts(accountsFor) : null,
+      calendar: await getMonthCalendar(month),
+      scopes: await listDailyScopes(),
+      accounts: accountsFor ? await getDayAccounts(accountsFor) : null,
     });
   });
 }

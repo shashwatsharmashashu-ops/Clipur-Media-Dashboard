@@ -9,7 +9,7 @@ export async function POST(request: Request) {
 
     if (!name) return badRequest("Niche name is required.");
 
-    createNiche({ platform, name });
+    await createNiche({ platform, name });
     return stateResponse();
   });
 }

@@ -33,7 +33,7 @@ export async function POST(request: Request) {
       return badRequest("Clip date must be YYYY-MM-DD.");
     }
 
-    const result = addClip({
+    const result = await addClip({
       ownerType: ownerType as ClipOwnerType,
       ownerId,
       url,

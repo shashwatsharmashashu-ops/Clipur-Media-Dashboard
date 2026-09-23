@@ -1,4 +1,5 @@
-import { getDb } from "./db";
+import type { Transaction } from "@libsql/client";
+import { execute, query, run } from "./db";
 import { DEFAULT_DAILY_TARGET } from "./schema.mjs";
 import { monthBounds, todayIso } from "./date";
 import type {
@@ -33,6 +34,11 @@ const PLATFORM_SCOPES: { scopeId: Platform; name: string }[] = [
   { scopeId: "tiktok", name: "TikTok" },
 ];
 
+/** libSQL can return integers as bigint depending on the driver path. */
+function num(value: unknown): number {
+  return Number(value ?? 0);
+}
+
 /* ----------------------------------------------------------------- scopes */
 
 interface StandingRow {
@@ -41,25 +47,22 @@ interface StandingRow {
   target: number;
 }
 
-function standingTargets(): Map<string, number> {
-  const rows = getDb()
-    .prepare("SELECT scope_type, scope_id, target FROM daily_targets")
-    .all() as unknown as StandingRow[];
-  return new Map(rows.map((row) => [`${row.scope_type}:${row.scope_id}`, row.target]));
-}
-
 /**
  * Every scope that carries a daily target: one per X niche, plus Instagram
  * and TikTok. Scopes come from the live data, so adding a niche gives it a
  * daily target automatically (defaulting to 40).
  */
-export function listDailyScopes(): DailyScope[] {
-  const db = getDb();
-  const standing = standingTargets();
+export async function listDailyScopes(): Promise<DailyScope[]> {
+  const [standingRows, niches] = await Promise.all([
+    query<StandingRow>("SELECT scope_type, scope_id, target FROM daily_targets"),
+    query<{ id: string; name: string }>(
+      "SELECT id, name FROM niches WHERE platform = 'x' ORDER BY sort ASC, name ASC",
+    ),
+  ]);
 
-  const niches = db
-    .prepare("SELECT id, name FROM niches WHERE platform = 'x' ORDER BY sort ASC, name ASC")
-    .all() as unknown as { id: string; name: string }[];
+  const standing = new Map(
+    standingRows.map((row) => [`${row.scope_type}:${row.scope_id}`, num(row.target)]),
+  );
 
   const nicheScopes: DailyScope[] = niches.map((niche) => ({
     scopeType: "niche",
@@ -87,38 +90,38 @@ export function listDailyScopes(): DailyScope[] {
  * 11am should apply to the day you are raising it on. Days already closed keep
  * the target they were measured against.
  */
-export function setStandingTarget(
+export async function setStandingTarget(
   scopeType: DailyScopeType,
   scopeId: string,
   target: number,
-): void {
-  const db = getDb();
+): Promise<void> {
   const value = Math.max(0, Math.round(target));
 
-  db.prepare(
+  await execute(
     `INSERT INTO daily_targets (scope_type, scope_id, target) VALUES (?, ?, ?)
      ON CONFLICT(scope_type, scope_id) DO UPDATE SET target = excluded.target`,
-  ).run(scopeType, scopeId, value);
+    [scopeType, scopeId, value],
+  );
 
-  db.prepare(
+  await execute(
     `INSERT INTO day_targets (scope_type, scope_id, date, target) VALUES (?, ?, ?, ?)
      ON CONFLICT(scope_type, scope_id, date) DO UPDATE SET target = excluded.target`,
-  ).run(scopeType, scopeId, todayIso(), value);
+    [scopeType, scopeId, todayIso(), value],
+  );
 }
 
 /** Corrects one specific day's target. Deliberate admin action, so it wins. */
-export function setDayTarget(
+export async function setDayTarget(
   scopeType: DailyScopeType,
   scopeId: string,
   date: string,
   target: number,
-): void {
-  getDb()
-    .prepare(
-      `INSERT INTO day_targets (scope_type, scope_id, date, target) VALUES (?, ?, ?, ?)
-       ON CONFLICT(scope_type, scope_id, date) DO UPDATE SET target = excluded.target`,
-    )
-    .run(scopeType, scopeId, date, Math.max(0, Math.round(target)));
+): Promise<void> {
+  await execute(
+    `INSERT INTO day_targets (scope_type, scope_id, date, target) VALUES (?, ?, ?, ?)
+     ON CONFLICT(scope_type, scope_id, date) DO UPDATE SET target = excluded.target`,
+    [scopeType, scopeId, date, Math.max(0, Math.round(target))],
+  );
 }
 
 /**
@@ -126,15 +129,18 @@ export function setDayTarget(
  * `INSERT OR IGNORE` is the whole point: an existing snapshot is never
  * overwritten, so history stays truthful.
  *
- * Runs inside the caller's transaction — it must not open one of its own.
+ * Pass the caller's transaction so the snapshot commits or rolls back with the
+ * clip that triggered it.
  */
-export function snapshotDayTargets(date: string): void {
-  const db = getDb();
-  const insert = db.prepare(
-    "INSERT OR IGNORE INTO day_targets (scope_type, scope_id, date, target) VALUES (?, ?, ?, ?)",
-  );
-  for (const scope of listDailyScopes()) {
-    insert.run(scope.scopeType, scope.scopeId, date, scope.target);
+export async function snapshotDayTargets(date: string, tx?: Transaction): Promise<void> {
+  const scopes = await listDailyScopes();
+  const sql =
+    "INSERT OR IGNORE INTO day_targets (scope_type, scope_id, date, target) VALUES (?, ?, ?, ?)";
+
+  for (const scope of scopes) {
+    const args = [scope.scopeType, scope.scopeId, date, scope.target];
+    if (tx) await run(tx, sql, args);
+    else await execute(sql, args);
   }
 }
 
@@ -170,24 +176,21 @@ interface CountRow {
  * A month of history: per-day totals for the grid, each carrying its full
  * per-scope breakdown so selecting a day needs no second request.
  */
-export function getMonthCalendar(month: string): CalendarMonth {
-  const db = getDb();
+export async function getMonthCalendar(month: string): Promise<CalendarMonth> {
   const { start, end } = monthBounds(month);
   const today = todayIso();
-  const scopes = listDailyScopes();
 
-  const nicheCounts = db
-    .prepare(
+  const [scopes, nicheCounts, platformCounts, dayTargetRows] = await Promise.all([
+    listDailyScopes(),
+    query<CountRow>(
       `SELECT a.niche_id AS scope_id, c.clip_date AS date, COUNT(*) AS count
          FROM clips c
          JOIN accounts a ON a.id = c.owner_id
         WHERE c.owner_type = 'account' AND c.clip_date >= ? AND c.clip_date <= ?
         GROUP BY a.niche_id, c.clip_date`,
-    )
-    .all(start, end) as unknown as CountRow[];
-
-  const platformCounts = db
-    .prepare(
+      [start, end],
+    ),
+    query<CountRow>(
       `SELECT i.platform AS scope_id, c.clip_date AS date, COUNT(*) AS count
          FROM clips c
          JOIN items i ON i.id = c.owner_id
@@ -195,21 +198,25 @@ export function getMonthCalendar(month: string): CalendarMonth {
           AND i.platform IN ('instagram', 'tiktok')
           AND c.clip_date >= ? AND c.clip_date <= ?
         GROUP BY i.platform, c.clip_date`,
-    )
-    .all(start, end) as unknown as CountRow[];
+      [start, end],
+    ),
+    query<{ scope_type: string; scope_id: string; date: string; target: number }>(
+      "SELECT scope_type, scope_id, date, target FROM day_targets WHERE date >= ? AND date <= ?",
+      [start, end],
+    ),
+  ]);
 
   const counts = new Map<string, number>();
-  for (const row of nicheCounts) counts.set(`niche:${row.scope_id}:${row.date}`, row.count);
-  for (const row of platformCounts) counts.set(`platform:${row.scope_id}:${row.date}`, row.count);
-
-  const dayTargetRows = db
-    .prepare(
-      "SELECT scope_type, scope_id, date, target FROM day_targets WHERE date >= ? AND date <= ?",
-    )
-    .all(start, end) as unknown as { scope_type: string; scope_id: string; date: string; target: number }[];
+  for (const row of nicheCounts) counts.set(`niche:${row.scope_id}:${row.date}`, num(row.count));
+  for (const row of platformCounts) {
+    counts.set(`platform:${row.scope_id}:${row.date}`, num(row.count));
+  }
 
   const dayTargets = new Map(
-    dayTargetRows.map((row) => [`${row.scope_type}:${row.scope_id}:${row.date}`, row.target]),
+    dayTargetRows.map((row) => [
+      `${row.scope_type}:${row.scope_id}:${row.date}`,
+      num(row.target),
+    ]),
   );
 
   const days: CalendarDay[] = [];
@@ -253,30 +260,29 @@ function nextDate(iso: string): string {
 }
 
 /** Optional per-account breakdown for X on one date. */
-export function getDayAccounts(date: string): DayAccountProgress[] {
-  const rows = getDb()
-    .prepare(
-      `SELECT a.id      AS accountId,
-              a.handle  AS handle,
-              a.niche_id AS nicheId,
-              n.name    AS nicheName,
-              COUNT(c.id) AS count
-         FROM accounts a
-         JOIN niches n ON n.id = a.niche_id
-         LEFT JOIN clips c
-           ON c.owner_id = a.id AND c.owner_type = 'account' AND c.clip_date = ?
-        WHERE n.platform = 'x'
-        GROUP BY a.id
-        ORDER BY n.sort ASC, a.sort ASC`,
-    )
-    .all(date) as unknown as DayAccountProgress[];
+export async function getDayAccounts(date: string): Promise<DayAccountProgress[]> {
+  const rows = await query<DayAccountProgress>(
+    `SELECT a.id       AS accountId,
+            a.handle   AS handle,
+            a.niche_id AS nicheId,
+            n.name     AS nicheName,
+            COUNT(c.id) AS count
+       FROM accounts a
+       JOIN niches n ON n.id = a.niche_id
+       LEFT JOIN clips c
+         ON c.owner_id = a.id AND c.owner_type = 'account' AND c.clip_date = ?
+      WHERE n.platform = 'x'
+      GROUP BY a.id
+      ORDER BY n.sort ASC, a.sort ASC`,
+    [date],
+  );
 
-  // Rebuilt as plain objects for the same reason as reports in repo.ts.
+  // Rebuilt as plain object literals for the same reason as reports in repo.ts.
   return rows.map<DayAccountProgress>((row) => ({
     accountId: row.accountId,
     handle: row.handle,
     nicheId: row.nicheId,
     nicheName: row.nicheName,
-    count: row.count,
+    count: num(row.count),
   }));
 }

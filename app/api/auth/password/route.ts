@@ -17,12 +17,12 @@ export async function POST(request: Request) {
 
     if (!current || !next) return badRequest("Both current and new password are required.");
 
-    const result = changePassword(user.id, current, next);
+    const result = await changePassword(user.id, current, next);
     if (!result.ok) return badRequest(result.error);
 
     // Drop every session, then issue a fresh one so the caller stays signed in.
-    destroyUserSessions(user.id);
-    const { token, expiresAt } = createSession(user.id);
+    await destroyUserSessions(user.id);
+    const { token, expiresAt } = await createSession(user.id);
     const store = await cookies();
     store.set(SESSION_COOKIE, token, sessionCookieOptions(expiresAt));
 

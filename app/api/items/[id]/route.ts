@@ -20,7 +20,7 @@ export async function PATCH(request: Request, { params }: Params) {
       status?: string;
     }>(request);
 
-    updateItem(id, {
+    await updateItem(id, {
       name: body.name,
       groupName: body.groupName,
       postsTarget: optionalNumber(body.postsTarget),
@@ -34,7 +34,7 @@ export async function PATCH(request: Request, { params }: Params) {
 export async function DELETE(_request: Request, { params }: Params) {
   return withAdmin(async () => {
     const { id } = await params;
-    deleteItem(id);
+    await deleteItem(id);
     return stateResponse();
   });
 }

@@ -36,7 +36,7 @@ export async function POST(request: Request) {
 
     if (urls.length === 0) return badRequest("Paste at least one link.");
 
-    const result = addClips({
+    const result = await addClips({
       ownerType: ownerType as ClipOwnerType,
       ownerId,
       urls,

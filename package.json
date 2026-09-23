@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
     "next": "^15.5.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
@@ -24,6 +25,6 @@
   },
   "description": "Internal output-tracking dashboard for the Clipur media team.",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=20.9.0"
   }
 }

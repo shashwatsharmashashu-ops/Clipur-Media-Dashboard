@@ -18,7 +18,7 @@ export async function PATCH(request: Request, { params }: Params) {
       return badRequest("Clip date must be YYYY-MM-DD.");
     }
 
-    updateClip(id, { label: body.label, views: body.views, clipDate: body.clipDate });
+    await updateClip(id, { label: body.label, views: body.views, clipDate: body.clipDate });
     return stateResponse();
   });
 }
@@ -27,7 +27,7 @@ export async function PATCH(request: Request, { params }: Params) {
 export async function DELETE(_request: Request, { params }: Params) {
   return withAdmin(async () => {
     const { id } = await params;
-    if (!deleteClip(id)) return notFound("Clip not found.");
+    if (!(await deleteClip(id))) return notFound("Clip not found.");
     return stateResponse();
   });
 }

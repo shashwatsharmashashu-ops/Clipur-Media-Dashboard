@@ -7,7 +7,7 @@ export async function PATCH(request: Request, { params }: Params) {
   return withAdmin(async () => {
     const { id } = await params;
     const body = await readJson<{ name?: string }>(request);
-    updateNiche(id, { name: body.name });
+    await updateNiche(id, { name: body.name });
     return stateResponse();
   });
 }
@@ -16,7 +16,7 @@ export async function PATCH(request: Request, { params }: Params) {
 export async function DELETE(_request: Request, { params }: Params) {
   return withAdmin(async () => {
     const { id } = await params;
-    deleteNiche(id);
+    await deleteNiche(id);
     return stateResponse();
   });
 }

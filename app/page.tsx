@@ -11,7 +11,7 @@ export default async function Page() {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
 
-  if (!isSeeded()) {
+  if (!(await isSeeded())) {
     return (
       <main className="mx-auto max-w-lg px-6 py-24 text-center">
         <h1 className="text-lg font-semibold text-text">Database not seeded</h1>
@@ -23,5 +23,5 @@ export default async function Page() {
     );
   }
 
-  return <AppShell initialState={getDashboardState()} user={user} />;
+  return <AppShell initialState={await getDashboardState()} user={user} />;
 }

@@ -20,7 +20,7 @@ export async function PATCH(request: Request, { params }: Params) {
       nicheId?: string;
     }>(request);
 
-    updateAccount(id, {
+    await updateAccount(id, {
       handle: body.handle,
       postsTarget: optionalNumber(body.postsTarget),
       postsMade: optionalNumber(body.postsMade),
@@ -34,7 +34,7 @@ export async function PATCH(request: Request, { params }: Params) {
 export async function DELETE(_request: Request, { params }: Params) {
   return withAdmin(async () => {
     const { id } = await params;
-    deleteAccount(id);
+    await deleteAccount(id);
     return stateResponse();
   });
 }

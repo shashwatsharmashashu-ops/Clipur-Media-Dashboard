@@ -7,7 +7,7 @@ export async function PATCH(request: Request, { params }: Params) {
   return withAdmin(async () => {
     const { id } = await params;
     const body = await readJson<{ week?: string; summary?: string; postedDate?: string }>(request);
-    updateReport(id, body);
+    await updateReport(id, body);
     return stateResponse();
   });
 }
@@ -15,7 +15,7 @@ export async function PATCH(request: Request, { params }: Params) {
 export async function DELETE(_request: Request, { params }: Params) {
   return withAdmin(async () => {
     const { id } = await params;
-    deleteReport(id);
+    await deleteReport(id);
     return stateResponse();
   });
 }

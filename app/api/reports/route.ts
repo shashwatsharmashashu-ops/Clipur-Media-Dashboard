@@ -7,7 +7,7 @@ export async function POST(request: Request) {
     const week = (body.week ?? "").trim();
     if (!week) return badRequest("A week label is required.");
 
-    createReport({ week, summary: body.summary, postedDate: body.postedDate });
+    await createReport({ week, summary: body.summary, postedDate: body.postedDate });
     return stateResponse();
   });
 }

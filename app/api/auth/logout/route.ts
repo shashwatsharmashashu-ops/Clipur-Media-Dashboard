@@ -5,7 +5,7 @@ import { json } from "@/lib/api";
 export async function POST() {
   const store = await cookies();
   const token = store.get(SESSION_COOKIE)?.value;
-  if (token) destroySession(token);
+  if (token) await destroySession(token);
   store.set(SESSION_COOKIE, "", sessionCookieOptions());
   return json({ ok: true });
 }

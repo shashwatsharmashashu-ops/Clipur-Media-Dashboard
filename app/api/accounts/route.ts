@@ -21,7 +21,7 @@ export async function POST(request: Request) {
     if (!body.nicheId) return badRequest("A niche is required.");
     if (!handle) return badRequest("Account handle is required.");
 
-    createAccount({
+    await createAccount({
       nicheId: body.nicheId,
       handle,
       postsTarget: optionalNumber(body.postsTarget) ?? 0,

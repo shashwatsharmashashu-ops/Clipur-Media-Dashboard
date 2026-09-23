@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
-import type { SQLInputValue } from "node:sqlite";
-import { getDb, transaction } from "./db";
+import type { InValue, Transaction } from "@libsql/client";
+import { execute, query, queryOne, run, select, withTx } from "./db";
 import { isProbablyUrl, normalizeUrl } from "./url";
 import { isIsoDate, todayIso } from "./date";
 import { snapshotDayTargets } from "./daily";
@@ -16,12 +16,15 @@ import type {
 } from "./types";
 
 /**
- * Data access for the dashboard. Every mutation writes straight to SQLite, so
- * an edit by one admin is immediately visible to the others.
+ * Data access for the dashboard. Every mutation writes straight to the
+ * database, so an edit by one admin is immediately visible to the others.
  *
  * Posted counts and clips are kept consistent here: adding a clip increments
  * the owner's postsMade by exactly one, removing it decrements. Duplicate
  * links (same normalized url, same owner) are rejected and never double-count.
+ *
+ * Everything is async because the store may be a remote libSQL database; see
+ * lib/db.ts.
  */
 
 function id(prefix: string): string {
@@ -30,6 +33,11 @@ function id(prefix: string): string {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/** libSQL can return integers as bigint depending on the driver path. */
+function num(value: unknown): number {
+  return Number(value ?? 0);
 }
 
 /* ------------------------------------------------------------------- read */
@@ -53,7 +61,7 @@ function toClip(row: ClipRow): Clip {
     url: row.url,
     normalizedUrl: row.normalized_url,
     label: row.label ?? undefined,
-    views: row.views,
+    views: row.views === null ? null : num(row.views),
     viewsSource: (row.views_source as Clip["viewsSource"]) ?? undefined,
     // Rows written before dates existed fall back to the day they were created.
     clipDate: row.clip_date ?? row.created_at.slice(0, 10),
@@ -61,10 +69,10 @@ function toClip(row: ClipRow): Clip {
   };
 }
 
-function clipsByOwner(): Map<string, Clip[]> {
-  const rows = getDb()
-    .prepare("SELECT * FROM clips ORDER BY clip_date ASC, created_at ASC")
-    .all() as unknown as ClipRow[];
+async function clipsByOwner(): Promise<Map<string, Clip[]>> {
+  const rows = await query<ClipRow>(
+    "SELECT * FROM clips ORDER BY clip_date ASC, created_at ASC",
+  );
 
   const map = new Map<string, Clip[]>();
   for (const row of rows) {
@@ -76,24 +84,45 @@ function clipsByOwner(): Map<string, Clip[]> {
   return map;
 }
 
-export function getDashboardState(): DashboardState {
-  const db = getDb();
-  const clipMap = clipsByOwner();
-
-  const nicheRows = db
-    .prepare("SELECT * FROM niches ORDER BY sort ASC, name ASC")
-    .all() as { id: string; platform: string; key: string; name: string }[];
-
-  const accountRows = db
-    .prepare("SELECT * FROM accounts ORDER BY sort ASC, handle ASC")
-    .all() as {
-    id: string;
-    niche_id: string;
-    handle: string;
-    status: string;
-    posts_target: number;
-    posts_made: number;
-  }[];
+export async function getDashboardState(): Promise<DashboardState> {
+  const [clipMap, nicheRows, accountRows, itemRows, strategyRows, reportRows] = await Promise.all([
+    clipsByOwner(),
+    query<{ id: string; platform: string; key: string; name: string }>(
+      "SELECT * FROM niches ORDER BY sort ASC, name ASC",
+    ),
+    query<{
+      id: string;
+      niche_id: string;
+      handle: string;
+      status: string;
+      posts_target: number;
+      posts_made: number;
+    }>("SELECT * FROM accounts ORDER BY sort ASC, handle ASC"),
+    query<{
+      id: string;
+      kind: string;
+      platform: string | null;
+      group_name: string | null;
+      name: string;
+      status: string;
+      posts_target: number;
+      posts_made: number;
+    }>("SELECT * FROM items ORDER BY sort ASC, name ASC"),
+    query<{
+      id: string;
+      title: string;
+      description: string;
+      status: string;
+      platform: string | null;
+      selected: number;
+      report_reach: string | null;
+      report_top_clip: string | null;
+      report_verdict: string | null;
+    }>("SELECT * FROM strategies ORDER BY sort ASC, title ASC"),
+    query<WeeklyReport>(
+      "SELECT id, week, summary, posted_date AS postedDate FROM reports ORDER BY posted_date DESC",
+    ),
+  ]);
 
   const niches: Niche[] = nicheRows.map((n) => ({
     id: n.id,
@@ -108,24 +137,11 @@ export function getDashboardState(): DashboardState {
         handle: a.handle,
         niche: n.key,
         status: a.status as Account["status"],
-        postsTarget: a.posts_target,
-        postsMade: a.posts_made,
+        postsTarget: num(a.posts_target),
+        postsMade: num(a.posts_made),
         clips: clipMap.get(`account:${a.id}`) ?? [],
       })),
   }));
-
-  const itemRows = db
-    .prepare("SELECT * FROM items ORDER BY sort ASC, name ASC")
-    .all() as {
-    id: string;
-    kind: string;
-    platform: string | null;
-    group_name: string | null;
-    name: string;
-    status: string;
-    posts_target: number;
-    posts_made: number;
-  }[];
 
   const items: TrackedItem[] = itemRows.map((i) => ({
     id: i.id,
@@ -134,30 +150,18 @@ export function getDashboardState(): DashboardState {
     groupName: i.group_name,
     name: i.name,
     status: i.status as TrackedItem["status"],
-    postsTarget: i.posts_target,
-    postsMade: i.posts_made,
+    postsTarget: num(i.posts_target),
+    postsMade: num(i.posts_made),
     clips: clipMap.get(`item:${i.id}`) ?? [],
   }));
 
-  const strategies = (
-    db.prepare("SELECT * FROM strategies ORDER BY sort ASC, title ASC").all() as {
-      id: string;
-      title: string;
-      description: string;
-      status: string;
-      platform: string | null;
-      selected: number;
-      report_reach: string | null;
-      report_top_clip: string | null;
-      report_verdict: string | null;
-    }[]
-  ).map<Strategy>((s) => ({
+  const strategies = strategyRows.map<Strategy>((s) => ({
     id: s.id,
     title: s.title,
     description: s.description,
     status: s.status as Strategy["status"],
     platform: (s.platform as Strategy["platform"]) ?? null,
-    selected: s.selected === 1,
+    selected: num(s.selected) === 1,
     report: s.report_verdict
       ? {
           reach: s.report_reach ?? undefined,
@@ -167,16 +171,9 @@ export function getDashboardState(): DashboardState {
       : undefined,
   }));
 
-  // node:sqlite returns null-prototype rows, which React Server Components
-  // refuse to serialise. Rebuild each row as a plain object before it can
-  // cross into a Client Component.
-  const reports = (
-    db
-      .prepare(
-        "SELECT id, week, summary, posted_date AS postedDate FROM reports ORDER BY posted_date DESC",
-      )
-      .all() as unknown as WeeklyReport[]
-  ).map<WeeklyReport>((row) => ({
+  // Rebuilt as plain object literals so React Server Components can serialise
+  // them into a Client Component.
+  const reports = reportRows.map<WeeklyReport>((row) => ({
     id: row.id,
     week: row.week,
     summary: row.summary,
@@ -192,68 +189,84 @@ function slugify(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "niche";
 }
 
-export function createNiche(input: { platform: string; name: string }): Niche["id"] {
-  const db = getDb();
+async function nextSort(table: string): Promise<number> {
+  const row = await queryOne<{ m: number | null }>(`SELECT MAX(sort) AS m FROM ${table}`);
+  return num(row?.m) + 1;
+}
+
+export async function createNiche(input: { platform: string; name: string }): Promise<string> {
   const nicheId = id("niche");
-  const sort =
-    ((db.prepare("SELECT MAX(sort) AS m FROM niches").get() as { m: number | null }).m ?? 0) + 1;
-  db.prepare(
-    "INSERT INTO niches (id, platform, key, name, sort) VALUES (?, ?, ?, ?, ?)",
-  ).run(nicheId, input.platform, slugify(input.name), input.name.trim(), sort);
+  await execute("INSERT INTO niches (id, platform, key, name, sort) VALUES (?, ?, ?, ?, ?)", [
+    nicheId,
+    input.platform,
+    slugify(input.name),
+    input.name.trim(),
+    await nextSort("niches"),
+  ]);
   return nicheId;
 }
 
-export function updateNiche(nicheId: string, patch: { name?: string }): void {
+export async function updateNiche(nicheId: string, patch: { name?: string }): Promise<void> {
   if (patch.name === undefined) return;
-  getDb()
-    .prepare("UPDATE niches SET name = ?, key = ? WHERE id = ?")
-    .run(patch.name.trim(), slugify(patch.name), nicheId);
+  await execute("UPDATE niches SET name = ?, key = ? WHERE id = ?", [
+    patch.name.trim(),
+    slugify(patch.name),
+    nicheId,
+  ]);
 }
 
-export function deleteNiche(nicheId: string): void {
-  const db = getDb();
-  transaction(() => {
-    const accounts = db
-      .prepare("SELECT id FROM accounts WHERE niche_id = ?")
-      .all(nicheId) as { id: string }[];
-    const del = db.prepare("DELETE FROM clips WHERE owner_type = 'account' AND owner_id = ?");
-    for (const account of accounts) del.run(account.id);
-    db.prepare("DELETE FROM niches WHERE id = ?").run(nicheId);
+export async function deleteNiche(nicheId: string): Promise<void> {
+  await withTx(async (tx) => {
+    const accounts = await select<{ id: string }>(
+      tx,
+      "SELECT id FROM accounts WHERE niche_id = ?",
+      [nicheId],
+    );
+    for (const account of accounts) {
+      await run(tx, "DELETE FROM clips WHERE owner_type = 'account' AND owner_id = ?", [
+        account.id,
+      ]);
+    }
+    await run(tx, "DELETE FROM niches WHERE id = ?", [nicheId]);
   });
 }
 
 /* --------------------------------------------------------------- accounts */
 
-export function createAccount(input: {
+export async function createAccount(input: {
   nicheId: string;
   handle: string;
   postsTarget?: number;
   status?: string;
-}): string {
-  const db = getDb();
+}): Promise<string> {
   const accountId = id("acct");
-  const sort =
-    ((db.prepare("SELECT MAX(sort) AS m FROM accounts").get() as { m: number | null }).m ?? 0) + 1;
-  db.prepare(
+  await execute(
     `INSERT INTO accounts (id, niche_id, handle, status, posts_target, posts_made, sort)
      VALUES (?, ?, ?, ?, ?, 0, ?)`,
-  ).run(
-    accountId,
-    input.nicheId,
-    input.handle.trim(),
-    input.status ?? "ongoing",
-    Math.max(0, input.postsTarget ?? 0),
-    sort,
+    [
+      accountId,
+      input.nicheId,
+      input.handle.trim(),
+      input.status ?? "ongoing",
+      Math.max(0, input.postsTarget ?? 0),
+      await nextSort("accounts"),
+    ],
   );
   return accountId;
 }
 
-export function updateAccount(
+export async function updateAccount(
   accountId: string,
-  patch: { handle?: string; postsTarget?: number; postsMade?: number; status?: string; nicheId?: string },
-): void {
+  patch: {
+    handle?: string;
+    postsTarget?: number;
+    postsMade?: number;
+    status?: string;
+    nicheId?: string;
+  },
+): Promise<void> {
   const sets: string[] = [];
-  const values: SQLInputValue[] = [];
+  const values: InValue[] = [];
 
   if (patch.handle !== undefined) {
     sets.push("handle = ?");
@@ -278,48 +291,45 @@ export function updateAccount(
   if (sets.length === 0) return;
 
   values.push(accountId);
-  getDb().prepare(`UPDATE accounts SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+  await execute(`UPDATE accounts SET ${sets.join(", ")} WHERE id = ?`, values);
 }
 
-export function deleteAccount(accountId: string): void {
-  const db = getDb();
-  transaction(() => {
-    db.prepare("DELETE FROM clips WHERE owner_type = 'account' AND owner_id = ?").run(accountId);
-    db.prepare("DELETE FROM accounts WHERE id = ?").run(accountId);
+export async function deleteAccount(accountId: string): Promise<void> {
+  await withTx(async (tx) => {
+    await run(tx, "DELETE FROM clips WHERE owner_type = 'account' AND owner_id = ?", [accountId]);
+    await run(tx, "DELETE FROM accounts WHERE id = ?", [accountId]);
   });
 }
 
 /* ------------------------------------------------------------------ items */
 
-export function createItem(input: {
+export async function createItem(input: {
   kind: "campaign" | "platform";
   platform?: string | null;
   groupName?: string | null;
   name: string;
   postsTarget?: number;
   status?: string;
-}): string {
-  const db = getDb();
+}): Promise<string> {
   const itemId = id("item");
-  const sort =
-    ((db.prepare("SELECT MAX(sort) AS m FROM items").get() as { m: number | null }).m ?? 0) + 1;
-  db.prepare(
+  await execute(
     `INSERT INTO items (id, kind, platform, group_name, name, status, posts_target, posts_made, sort)
      VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
-  ).run(
-    itemId,
-    input.kind,
-    input.platform ?? null,
-    input.groupName ?? null,
-    input.name.trim(),
-    input.status ?? "ongoing",
-    Math.max(0, input.postsTarget ?? 0),
-    sort,
+    [
+      itemId,
+      input.kind,
+      input.platform ?? null,
+      input.groupName ?? null,
+      input.name.trim(),
+      input.status ?? "ongoing",
+      Math.max(0, input.postsTarget ?? 0),
+      await nextSort("items"),
+    ],
   );
   return itemId;
 }
 
-export function updateItem(
+export async function updateItem(
   itemId: string,
   patch: {
     name?: string;
@@ -328,9 +338,9 @@ export function updateItem(
     postsMade?: number;
     status?: string;
   },
-): void {
+): Promise<void> {
   const sets: string[] = [];
-  const values: SQLInputValue[] = [];
+  const values: InValue[] = [];
 
   if (patch.name !== undefined) {
     sets.push("name = ?");
@@ -355,14 +365,13 @@ export function updateItem(
   if (sets.length === 0) return;
 
   values.push(itemId);
-  getDb().prepare(`UPDATE items SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+  await execute(`UPDATE items SET ${sets.join(", ")} WHERE id = ?`, values);
 }
 
-export function deleteItem(itemId: string): void {
-  const db = getDb();
-  transaction(() => {
-    db.prepare("DELETE FROM clips WHERE owner_type = 'item' AND owner_id = ?").run(itemId);
-    db.prepare("DELETE FROM items WHERE id = ?").run(itemId);
+export async function deleteItem(itemId: string): Promise<void> {
+  await withTx(async (tx) => {
+    await run(tx, "DELETE FROM clips WHERE owner_type = 'item' AND owner_id = ?", [itemId]);
+    await run(tx, "DELETE FROM items WHERE id = ?", [itemId]);
   });
 }
 
@@ -373,10 +382,15 @@ const OWNER_TABLE: Record<ClipOwnerType, string> = {
   item: "items",
 };
 
-export function ownerExists(ownerType: ClipOwnerType, ownerId: string): boolean {
+export async function ownerExists(
+  ownerType: ClipOwnerType,
+  ownerId: string,
+): Promise<boolean> {
   const table = OWNER_TABLE[ownerType];
   if (!table) return false;
-  const row = getDb().prepare(`SELECT 1 AS ok FROM ${table} WHERE id = ?`).get(ownerId);
+  const row = await queryOne<{ ok: number }>(`SELECT 1 AS ok FROM ${table} WHERE id = ?`, [
+    ownerId,
+  ]);
   return Boolean(row);
 }
 
@@ -390,7 +404,7 @@ export type AddClipResult =
  * A url that normalizes to one already logged for this owner is rejected —
  * it must never count twice.
  */
-export function addClip(input: {
+export async function addClip(input: {
   ownerType: ClipOwnerType;
   ownerId: string;
   url: string;
@@ -398,18 +412,17 @@ export function addClip(input: {
   views?: number | null;
   /** The day this clip counts toward. Defaults to today. */
   clipDate?: string;
-}): AddClipResult {
-  const db = getDb();
-  if (!ownerExists(input.ownerType, input.ownerId)) return { ok: false, reason: "no_owner" };
+}): Promise<AddClipResult> {
+  if (!(await ownerExists(input.ownerType, input.ownerId))) {
+    return { ok: false, reason: "no_owner" };
+  }
 
   const normalized = normalizeUrl(input.url);
 
-  const existing = db
-    .prepare(
-      "SELECT * FROM clips WHERE owner_type = ? AND owner_id = ? AND normalized_url = ?",
-    )
-    .get(input.ownerType, input.ownerId, normalized) as unknown as ClipRow | undefined;
-
+  const existing = await queryOne<ClipRow>(
+    "SELECT * FROM clips WHERE owner_type = ? AND owner_id = ? AND normalized_url = ?",
+    [input.ownerType, input.ownerId, normalized],
+  );
   if (existing) return { ok: false, reason: "duplicate", clip: toClip(existing) };
 
   const clipId = id("clip");
@@ -417,30 +430,32 @@ export function addClip(input: {
   const clipDate = isIsoDate(input.clipDate) ? input.clipDate : todayIso();
   const table = OWNER_TABLE[input.ownerType];
 
-  transaction(() => {
-    db.prepare(
+  await withTx(async (tx) => {
+    await run(
+      tx,
       `INSERT INTO clips (id, owner_type, owner_id, url, normalized_url, label, views, views_source, clip_date, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      clipId,
-      input.ownerType,
-      input.ownerId,
-      input.url.trim(),
-      normalized,
-      input.label?.trim() || null,
-      input.views ?? null,
-      input.views === null || input.views === undefined ? null : "manual",
-      clipDate,
-      createdAt,
+      [
+        clipId,
+        input.ownerType,
+        input.ownerId,
+        input.url.trim(),
+        normalized,
+        input.label?.trim() || null,
+        input.views ?? null,
+        input.views === null || input.views === undefined ? null : "manual",
+        clipDate,
+        createdAt,
+      ],
     );
-    db.prepare(`UPDATE ${table} SET posts_made = posts_made + 1 WHERE id = ?`).run(input.ownerId);
+    await run(tx, `UPDATE ${table} SET posts_made = posts_made + 1 WHERE id = ?`, [input.ownerId]);
     // Freeze the target that applied on this day, so later changes to the
     // standing target cannot rewrite history.
-    snapshotDayTargets(clipDate);
+    await snapshotDayTargets(clipDate, tx);
   });
 
-  const row = db.prepare("SELECT * FROM clips WHERE id = ?").get(clipId) as unknown as ClipRow;
-  return { ok: true, clip: toClip(row) };
+  const row = await queryOne<ClipRow>("SELECT * FROM clips WHERE id = ?", [clipId]);
+  return { ok: true, clip: toClip(row as ClipRow) };
 }
 
 export interface BulkAddSummary {
@@ -470,25 +485,24 @@ export type AddClipsResult =
  * counted once. The whole batch is one transaction — either all the accepted
  * links land with their matching count bump, or none do.
  */
-export function addClips(input: {
+export async function addClips(input: {
   ownerType: ClipOwnerType;
   ownerId: string;
   urls: string[];
   clipDate?: string;
-}): AddClipsResult {
-  const db = getDb();
-  if (!ownerExists(input.ownerType, input.ownerId)) return { ok: false, reason: "no_owner" };
+}): Promise<AddClipsResult> {
+  if (!(await ownerExists(input.ownerType, input.ownerId))) {
+    return { ok: false, reason: "no_owner" };
+  }
 
   const clipDate = isIsoDate(input.clipDate) ? input.clipDate : todayIso();
   const table = OWNER_TABLE[input.ownerType];
 
-  const stored = new Set(
-    (
-      db
-        .prepare("SELECT normalized_url FROM clips WHERE owner_type = ? AND owner_id = ?")
-        .all(input.ownerType, input.ownerId) as { normalized_url: string }[]
-    ).map((row) => row.normalized_url),
+  const storedRows = await query<{ normalized_url: string }>(
+    "SELECT normalized_url FROM clips WHERE owner_type = ? AND owner_id = ?",
+    [input.ownerType, input.ownerId],
   );
+  const stored = new Set(storedRows.map((row) => row.normalized_url));
 
   const seen = new Set<string>();
   const accepted: { url: string; normalized: string }[] = [];
@@ -517,29 +531,29 @@ export function addClips(input: {
   }
 
   if (accepted.length > 0) {
-    const insert = db.prepare(
-      `INSERT INTO clips (id, owner_type, owner_id, url, normalized_url, label, views, views_source, clip_date, created_at)
-       VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
-    );
-
-    transaction(() => {
+    await withTx(async (tx) => {
       const createdAt = nowIso();
       for (const entry of accepted) {
-        insert.run(
-          id("clip"),
-          input.ownerType,
-          input.ownerId,
-          entry.url,
-          entry.normalized,
-          clipDate,
-          createdAt,
+        await run(
+          tx,
+          `INSERT INTO clips (id, owner_type, owner_id, url, normalized_url, label, views, views_source, clip_date, created_at)
+           VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)`,
+          [
+            id("clip"),
+            input.ownerType,
+            input.ownerId,
+            entry.url,
+            entry.normalized,
+            clipDate,
+            createdAt,
+          ],
         );
       }
-      db.prepare(`UPDATE ${table} SET posts_made = posts_made + ? WHERE id = ?`).run(
+      await run(tx, `UPDATE ${table} SET posts_made = posts_made + ? WHERE id = ?`, [
         accepted.length,
         input.ownerId,
-      );
-      snapshotDayTargets(clipDate);
+      ]);
+      await snapshotDayTargets(clipDate, tx);
     });
   }
 
@@ -554,19 +568,19 @@ export function addClips(input: {
 }
 
 /** Removes a clip and gives back the post it counted for (never below zero). */
-export function deleteClip(clipId: string): boolean {
-  const db = getDb();
-  const row = db.prepare("SELECT owner_type, owner_id FROM clips WHERE id = ?").get(clipId) as
-    | { owner_type: ClipOwnerType; owner_id: string }
-    | undefined;
+export async function deleteClip(clipId: string): Promise<boolean> {
+  const row = await queryOne<{ owner_type: ClipOwnerType; owner_id: string }>(
+    "SELECT owner_type, owner_id FROM clips WHERE id = ?",
+    [clipId],
+  );
   if (!row) return false;
 
   const table = OWNER_TABLE[row.owner_type];
-  transaction(() => {
-    db.prepare("DELETE FROM clips WHERE id = ?").run(clipId);
-    db.prepare(
-      `UPDATE ${table} SET posts_made = MAX(0, posts_made - 1) WHERE id = ?`,
-    ).run(row.owner_id);
+  await withTx(async (tx) => {
+    await run(tx, "DELETE FROM clips WHERE id = ?", [clipId]);
+    await run(tx, `UPDATE ${table} SET posts_made = MAX(0, posts_made - 1) WHERE id = ?`, [
+      row.owner_id,
+    ]);
   });
   return true;
 }
@@ -575,12 +589,12 @@ export function deleteClip(clipId: string): boolean {
  * Edits a clip. Changing `clipDate` moves the clip between days, which is how
  * an admin backfills a day they logged late.
  */
-export function updateClip(
+export async function updateClip(
   clipId: string,
   patch: { label?: string | null; views?: number | null; clipDate?: string },
-): void {
+): Promise<void> {
   const sets: string[] = [];
-  const values: SQLInputValue[] = [];
+  const values: InValue[] = [];
 
   if (patch.label !== undefined) {
     sets.push("label = ?");
@@ -597,41 +611,39 @@ export function updateClip(
   if (sets.length === 0) return;
 
   values.push(clipId);
-  getDb().prepare(`UPDATE clips SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+  await execute(`UPDATE clips SET ${sets.join(", ")} WHERE id = ?`, values);
 
   // The day it moved onto now has activity and needs its own target snapshot.
   if (patch.clipDate !== undefined && isIsoDate(patch.clipDate)) {
-    snapshotDayTargets(patch.clipDate);
+    await snapshotDayTargets(patch.clipDate);
   }
 }
 
 /* ------------------------------------------------------------- strategies */
 
-export function createStrategy(input: {
+export async function createStrategy(input: {
   title: string;
   description?: string;
   status?: string;
   platform?: string | null;
-}): string {
-  const db = getDb();
+}): Promise<string> {
   const strategyId = id("strat");
-  const sort =
-    ((db.prepare("SELECT MAX(sort) AS m FROM strategies").get() as { m: number | null }).m ?? 0) + 1;
-  db.prepare(
+  await execute(
     `INSERT INTO strategies (id, title, description, status, platform, selected, sort)
      VALUES (?, ?, ?, ?, ?, 0, ?)`,
-  ).run(
-    strategyId,
-    input.title.trim(),
-    input.description?.trim() ?? "",
-    input.status ?? "ongoing",
-    input.platform ?? null,
-    sort,
+    [
+      strategyId,
+      input.title.trim(),
+      input.description?.trim() ?? "",
+      input.status ?? "ongoing",
+      input.platform ?? null,
+      await nextSort("strategies"),
+    ],
   );
   return strategyId;
 }
 
-export function updateStrategy(
+export async function updateStrategy(
   strategyId: string,
   patch: {
     title?: string;
@@ -641,9 +653,9 @@ export function updateStrategy(
     platform?: string | null;
     report?: { reach?: string; topClip?: string; verdict?: string } | null;
   },
-): void {
+): Promise<void> {
   const sets: string[] = [];
-  const values: SQLInputValue[] = [];
+  const values: InValue[] = [];
 
   if (patch.title !== undefined) {
     sets.push("title = ?");
@@ -676,38 +688,36 @@ export function updateStrategy(
   if (sets.length === 0) return;
 
   values.push(strategyId);
-  getDb().prepare(`UPDATE strategies SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+  await execute(`UPDATE strategies SET ${sets.join(", ")} WHERE id = ?`, values);
 }
 
-export function deleteStrategy(strategyId: string): void {
-  getDb().prepare("DELETE FROM strategies WHERE id = ?").run(strategyId);
+export async function deleteStrategy(strategyId: string): Promise<void> {
+  await execute("DELETE FROM strategies WHERE id = ?", [strategyId]);
 }
 
 /* ---------------------------------------------------------------- reports */
 
-export function createReport(input: {
+export async function createReport(input: {
   week: string;
   summary?: string;
   postedDate?: string;
-}): string {
+}): Promise<string> {
   const reportId = id("rep");
-  getDb()
-    .prepare("INSERT INTO reports (id, week, summary, posted_date) VALUES (?, ?, ?, ?)")
-    .run(
-      reportId,
-      input.week.trim(),
-      input.summary?.trim() ?? "",
-      input.postedDate ?? new Date().toISOString().slice(0, 10),
-    );
+  await execute("INSERT INTO reports (id, week, summary, posted_date) VALUES (?, ?, ?, ?)", [
+    reportId,
+    input.week.trim(),
+    input.summary?.trim() ?? "",
+    input.postedDate ?? new Date().toISOString().slice(0, 10),
+  ]);
   return reportId;
 }
 
-export function updateReport(
+export async function updateReport(
   reportId: string,
   patch: { week?: string; summary?: string; postedDate?: string },
-): void {
+): Promise<void> {
   const sets: string[] = [];
-  const values: SQLInputValue[] = [];
+  const values: InValue[] = [];
 
   if (patch.week !== undefined) {
     sets.push("week = ?");
@@ -724,9 +734,12 @@ export function updateReport(
   if (sets.length === 0) return;
 
   values.push(reportId);
-  getDb().prepare(`UPDATE reports SET ${sets.join(", ")} WHERE id = ?`).run(...values);
+  await execute(`UPDATE reports SET ${sets.join(", ")} WHERE id = ?`, values);
 }
 
-export function deleteReport(reportId: string): void {
-  getDb().prepare("DELETE FROM reports WHERE id = ?").run(reportId);
+export async function deleteReport(reportId: string): Promise<void> {
+  await execute("DELETE FROM reports WHERE id = ?", [reportId]);
 }
+
+/** Re-exported so callers can type a transaction without importing the driver. */
+export type { Transaction };

@@ -9,11 +9,11 @@ export async function POST(request: Request) {
 
   if (!username || !password) return badRequest("Username and password are required.");
 
-  const user = authenticate(username, password);
+  const user = await authenticate(username, password);
   // Deliberately vague: never reveal whether the username exists.
   if (!user) return json({ error: "Incorrect username or password." }, 401);
 
-  const { token, expiresAt } = createSession(user.id);
+  const { token, expiresAt } = await createSession(user.id);
   const store = await cookies();
   store.set(SESSION_COOKIE, token, sessionCookieOptions(expiresAt));
 
