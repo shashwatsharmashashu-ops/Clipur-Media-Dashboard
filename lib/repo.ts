@@ -167,9 +167,21 @@ export function getDashboardState(): DashboardState {
       : undefined,
   }));
 
-  const reports = db
-    .prepare("SELECT id, week, summary, posted_date AS postedDate FROM reports ORDER BY posted_date DESC")
-    .all() as unknown as WeeklyReport[];
+  // node:sqlite returns null-prototype rows, which React Server Components
+  // refuse to serialise. Rebuild each row as a plain object before it can
+  // cross into a Client Component.
+  const reports = (
+    db
+      .prepare(
+        "SELECT id, week, summary, posted_date AS postedDate FROM reports ORDER BY posted_date DESC",
+      )
+      .all() as unknown as WeeklyReport[]
+  ).map<WeeklyReport>((row) => ({
+    id: row.id,
+    week: row.week,
+    summary: row.summary,
+    postedDate: row.postedDate,
+  }));
 
   return { niches, items, strategies, reports };
 }

@@ -254,7 +254,7 @@ function nextDate(iso: string): string {
 
 /** Optional per-account breakdown for X on one date. */
 export function getDayAccounts(date: string): DayAccountProgress[] {
-  return getDb()
+  const rows = getDb()
     .prepare(
       `SELECT a.id      AS accountId,
               a.handle  AS handle,
@@ -270,4 +270,13 @@ export function getDayAccounts(date: string): DayAccountProgress[] {
         ORDER BY n.sort ASC, a.sort ASC`,
     )
     .all(date) as unknown as DayAccountProgress[];
+
+  // Rebuilt as plain objects for the same reason as reports in repo.ts.
+  return rows.map<DayAccountProgress>((row) => ({
+    accountId: row.accountId,
+    handle: row.handle,
+    nicheId: row.nicheId,
+    nicheName: row.nicheName,
+    count: row.count,
+  }));
 }
